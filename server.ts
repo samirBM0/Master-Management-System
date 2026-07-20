@@ -816,10 +816,16 @@ async function startServer() {
   }
 
   // Bind to loopback by default; only expose when SERVER_HOST is explicitly set
-  const HOST = process.env.SERVER_HOST || "127.0.0.1";
-  app.listen(PORT, HOST, () => {
-    console.log(`Server running on ${HOST}:${PORT}`);
-  });
+ // const HOST = process.env.SERVER_HOST || "127.0.0.1";
+  //app.listen(PORT, HOST, () => {
+    //console.log(`Server running on ${HOST}:${PORT}`);
+  //});
+  const PORT = process.env.PORT || 3005;
+
+// تأكد من إضافة '0.0.0.0' لتسمح لـ Render بالاتصال بالسيرفر
+app.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+});
 }
 
 startServer();
