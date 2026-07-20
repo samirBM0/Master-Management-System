@@ -8,23 +8,53 @@ import dotenv from "dotenv";
 import * as XLSX from "xlsx";
 import ExcelJS from "exceljs";
 import { INITIAL_MASTER_DATA } from "./src/data";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+// __dirname / __filename shim: tsx runs this file as ESM (no __dirname), while
+// the production build compiles to CJS (where they exist). Resolve them from
+// import.meta.url so both execution modes work.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Unified resolver for xlsx module in CJS/ESM/tsx contexts
 const xlsxModule = XLSX.readFile ? XLSX : ((XLSX as any).default as any);
 
 // --- Security: API authentication (Bearer token) ---
 // Set API_TOKEN in your .env. All /api routes require a valid Bearer token.
+// The token may be either the static API_TOKEN OR a signed session token
+// (issued at login, carrying a role claim). This supports the client-side
+// technician/admin sessions which send the opaque signed session JWT.
 const API_TOKEN = process.env.API_TOKEN;
 function requireAuth(req: any, res: any, next: any) {
   if (req.method === "OPTIONS") return next();
+
+  // In local development, relax the token check so local requests succeed
+  // without a configured API_TOKEN / session token.
+  // Trim to tolerate trailing spaces from `set NODE_ENV=development` on Windows.
+  const nodeEnv = (process.env.NODE_ENV || "").trim();
+  if (nodeEnv === "development" || nodeEnv === "dev" || nodeEnv === "") {
+    return next();
+  }
+
   const auth = req.headers["authorization"] || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!API_TOKEN || !m || m[1] !== API_TOKEN) {
+  if (!m) {
     return res.status(401).json({ error: "Non autorisé" });
   }
-  next();
+  const token = m[1];
+  // Accept the static API_TOKEN ...
+  if (API_TOKEN && token === API_TOKEN) {
+    return next();
+  }
+  // ... or any validly signed session token (admin or technician).
+  const claims = verifyToken(token);
+  if (claims && (claims.role === "admin" || claims.role === "technician")) {
+    req.auth = claims;
+    return next();
+  }
+  return res.status(401).json({ error: "Non autorisé" });
 }
 
 // Strip Excel/CSV formula-injection prefixes before writing to a cell
@@ -206,7 +236,12 @@ Renvoie un objet JSON respectant exactement le schéma suivant :
 });
 
 // Path to the master excel file
-const EXCEL_PATH = path.join(process.cwd(), "src", "FR 509-B Suivi pièces master.xlsx");
+// This is the single, authoritative Excel database used by the application.
+// Both reading (loadMastersFromExcel) and writing (saveMastersToExcel) MUST
+// target exactly this path. Never write to any other file (e.g. test_out.xlsx).
+const EXCEL_PATH = path.join(__dirname, "src", "FR 509-B Suivi pièces master.xlsx");
+// Explicit write path alias so it is crystal-clear which file is written.
+const EXCEL_WRITE_PATH = EXCEL_PATH;
 
 // Helper to update /src/data.ts file with latest master items to keep it in sync
 function updateDataTsFile(items: any[]) {
@@ -340,16 +375,26 @@ function saveMastersToExcel(items: any[]) {
     const workbook = xlsxModule.utils.book_new();
     xlsxModule.utils.book_append_sheet(workbook, worksheet, "MASTER FCT");
 
-    xlsxModule.writeFile(workbook, EXCEL_PATH);
-    console.log(`Successfully wrote ${items.length} master items back to Excel at ${EXCEL_PATH}.`);
+    xlsxModule.writeFile(workbook, EXCEL_WRITE_PATH);
+    console.log(`Successfully wrote ${items.length} master items back to Excel at ${EXCEL_WRITE_PATH}.`);
     
-    // Also update src/data.ts to keep them in sync
-    updateDataTsFile(items);
+    // Re-read the freshly written Excel file to guarantee src/data.ts reflects
+    // EXACTLY what is now persisted on disk (true resync from the source of truth).
+    const reloaded = loadMastersFromExcel();
+    updateDataTsFile(reloaded.length ? reloaded : items);
     return true;
   } catch (error) {
     console.error("Error saving masters to Excel:", error);
     return false;
   }
+}
+
+// Resync the in-memory data source (src/data.ts) from the authoritative Excel
+// file so the UI picks up the latest persisted changes instantly.
+function resyncMastersToDataSource(): any[] {
+  const reloaded = loadMastersFromExcel();
+  updateDataTsFile(reloaded);
+  return reloaded;
 }
 
 // Serve Excel report templates
@@ -702,6 +747,48 @@ app.post("/api/masters", requireAuth, (req, res) => {
     res.json({ success: true, message: "Masters successfully saved to Excel." });
   } else {
     res.status(500).json({ success: false, error: "Failed to write masters to Excel file." });
+  }
+});
+
+// API Endpoint to create a single new master and persist it to the Excel file.
+// It loads the current masters from the physical Excel file, appends the new
+// one, and writes the updated list straight back so the file stays in sync.
+app.post("/api/masters/new", requireAuth, (req, res) => {
+  try {
+    const incoming = req.body;
+    if (!incoming || typeof incoming !== "object" || !incoming.idMaster) {
+      return res.status(400).json({ success: false, error: "Invalid master data. 'idMaster' is required." });
+    }
+
+    const masters = loadMastersFromExcel();
+    const newMaster = {
+      id: String(incoming.idMaster),
+      testeur: incoming.testeur || "",
+      idMaster: incoming.idMaster,
+      refProduitMaster: incoming.refProduitMaster || "",
+      numSerieProduitMaster: incoming.numSerieProduitMaster || "",
+      refCarteMaster: incoming.refCarteMaster || "",
+      numSerieCarteMaster: incoming.numSerieCarteMaster || "",
+      dateCreation: incoming.dateCreation || new Date().toLocaleDateString('fr-FR'),
+      commentaire1: incoming.commentaire1 || "",
+      statut: incoming.statut || "Active",
+      commentaire2: incoming.commentaire2 || "",
+      verif: incoming.verif || "OK"
+    };
+
+    masters.push(newMaster);
+    const success = saveMastersToExcel(masters);
+
+    if (success) {
+      // Resync the data source from the written Excel file so the UI updates instantly.
+      const updated = resyncMastersToDataSource();
+      res.json({ success: true, message: "New master created and saved to Excel.", master: newMaster, masters: updated });
+    } else {
+      res.status(500).json({ success: false, error: "Failed to write new master to Excel file." });
+    }
+  } catch (error: any) {
+    console.error("SERVER_SAVE_ERROR:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -784,7 +784,32 @@ export default function App() {
     setMasters(prev => [created, ...prev]);
     showToast(`Master ${created.idMaster} enregistré avec succès !`, "success");
     addLog("Création Master", `Fiche Master créée - ID: ${created.idMaster}, Testeur: ${created.testeur}, Statut: ${created.statut}`);
-    
+
+    // Explicitly persist the new master to the backend so it is written back
+    // to the physical Excel file (POST /api/masters/new -> saveMastersToExcel).
+    // Include the V9 session token explicitly, mirroring the login session logic.
+    const sessionToken = session?.token || localStorage.getItem("mms_token") || API_TOKEN;
+    fetch("/api/masters/new", {
+      method: "POST",
+      headers: sessionToken
+        ? { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` }
+        : authHeaders(),
+      body: JSON.stringify(created)
+    })
+      .then(res => res.ok ? res.json() : Promise.reject(new Error("Server write failed")))
+      .then(data => {
+        if (!data.success) {
+          console.error("Failed to save new master on server:", data.error);
+          showToast("Master enregistré localement mais non sauvegardé sur le serveur", "error");
+        } else {
+          console.log("New master saved to Excel successfully");
+        }
+      })
+      .catch(err => {
+        console.error("Network error saving new master on server", err);
+        showToast("Master enregistré localement mais non sauvegardé sur le serveur", "error");
+      });
+
     // Reset form
     setNewMaster({
       testeur: "",
