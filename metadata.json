@@ -1,0 +1,6 @@
+{
+  "name": "Master Management System",
+  "description": "Application de gestion des pièces masters, création de nouveaux masters et calcul de capabilité et répétabilité pour les testeurs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
