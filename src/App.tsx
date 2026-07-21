@@ -959,52 +959,91 @@ export default function App() {
   // User Session Management (V9: restore from opaque token + identity cache)
   const [session, setSession] = useState<UserSession | null>(() => {
     const token = (typeof localStorage !== "undefined") ? localStorage.getItem("mms_token") : null;
-    if (!token) return null;
-    
-    const claims = decodeV9Token(token);
-    if (!claims || !claims.role || !claims.matricule) {
-      localStorage.removeItem("mms_token");
-      return null;
-    }
-    
-    let name = "";
-    const saved = localStorage.getItem("mms_user_session");
-    if (saved) {
+    const savedIdentity = (typeof localStorage !== "undefined") ? localStorage.getItem("mms_user_session") : null;
+
+    let role: string | undefined;
+    let matricule: string | undefined;
+    let name: string | undefined;
+
+    if (savedIdentity) {
       try {
-        const parsed = JSON.parse(saved);
-        name = parsed.name || "";
+        const parsed = JSON.parse(savedIdentity);
+        role = parsed.role;
+        matricule = parsed.matricule;
+        name = parsed.name;
       } catch (e) {
         console.error("Error reading saved user session", e);
       }
     }
-    
-    return {
-      role: claims.role,
-      matricule: claims.matricule,
-      name,
-      token
-    };
+
+    if (token) {
+      const claims = decodeV9Token(token);
+      if (claims && claims.role && claims.matricule) {
+        return {
+          role: claims.role,
+          matricule: claims.matricule,
+          name: name || "",
+          token
+        };
+      }
+      localStorage.removeItem("mms_token");
+    }
+
+    if (role && matricule) {
+      return { role, matricule, name: name || "", token: "" };
+    }
+
+    return null;
   });
 
-  // Authorized Technicians State
+  // Authorized Technicians State: initialize from defaults, then fetch from server
   const [technicians, setTechnicians] = useState<{ matricule: string; name: string }[]>(() => {
-    const saved = localStorage.getItem("mms_authorized_technicians");
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Error reading saved technicians", e);
-      }
-    }
-    return [
+    const DEFAULT_TECHS = [
       { matricule: "MTR01", name: "BEN MANSOUR Samir" },
       { matricule: "MTR02", name: "DURAND Nicolas" }
     ];
+    return DEFAULT_TECHS;
   });
 
-  // Save technicians to localStorage
+  // Fetch technicians from server on mount
   useEffect(() => {
-    localStorage.setItem("mms_authorized_technicians", JSON.stringify(technicians));
+    fetch("/api/technicians", { headers: authHeaders() })
+      .then(res => {
+        if (!res.ok) throw new Error("Server response was not ok");
+        return res.json();
+      })
+      .then(data => {
+        if (data && Array.isArray(data) && data.length > 0) {
+          setTechnicians(data);
+        }
+      })
+      .catch(err => {
+        console.error("Failed to load technicians from server, using local fallback", err);
+        const saved = localStorage.getItem("mms_technicians");
+        if (saved) {
+          try {
+            const parsed: { matricule: string; name: string }[] = JSON.parse(saved);
+            const DEFAULT_TECHS = [
+              { matricule: "MTR01", name: "BEN MANSOUR Samir" },
+              { matricule: "MTR02", name: "DURAND Nicolas" }
+            ];
+            const merged = [...DEFAULT_TECHS];
+            for (const t of parsed) {
+              if (!merged.some(d => d.matricule === t.matricule)) {
+                merged.push(t);
+              }
+            }
+            setTechnicians(merged);
+          } catch (e) {
+            console.error("Error reading saved technicians", e);
+          }
+        }
+      });
+  }, []);
+
+  // Save technicians to localStorage as cache
+  useEffect(() => {
+    localStorage.setItem("mms_technicians", JSON.stringify(technicians));
   }, [technicians]);
 
   // Logs / Change History State
@@ -1078,6 +1117,25 @@ export default function App() {
     showToast(`Technicien ${created.name} enregistré avec succès !`, "success");
     setNewTechMatricule("");
     setNewTechName("");
+
+    const sessionToken = session?.token || localStorage.getItem("mms_token") || API_TOKEN;
+    fetch("/api/technicians", {
+      method: "POST",
+      headers: sessionToken
+        ? { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` }
+        : authHeaders(),
+      body: JSON.stringify(created)
+    }).then(res => res.ok ? res.json() : Promise.reject(new Error("Server write failed")))
+      .then(data => {
+        if (!data.success) {
+          console.error("Failed to save technician on server:", data.error);
+          showToast("Technicien enregistré localement mais non sauvegardé sur le serveur", "error");
+        }
+      })
+      .catch(err => {
+        console.error("Network error saving technician on server", err);
+        showToast("Technicien enregistré localement mais non sauvegardé sur le serveur", "error");
+      });
   };
 
   const handleDeleteTechnician = (matricule: string) => {
@@ -1087,6 +1145,17 @@ export default function App() {
     addLog("Suppression Technicien", `Compte du technicien supprimé : ${tech.name} (${tech.matricule})`);
     showToast(`Technicien ${tech.name} supprimé.`, "info");
     setTechToDelete(null);
+
+    const sessionToken = session?.token || localStorage.getItem("mms_token") || API_TOKEN;
+    fetch(`/api/technicians/${encodeURIComponent(matricule)}`, {
+      method: "DELETE",
+      headers: sessionToken
+        ? { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` }
+        : authHeaders()
+    }).catch(err => {
+      console.error("Network error deleting technician on server", err);
+      showToast("Technicien supprimé localement mais non supprimé sur le serveur", "error");
+    });
   };
 
   const handleClearLogs = () => {
@@ -1131,7 +1200,9 @@ export default function App() {
   // Keep track of session in localStorage and update operator
   useEffect(() => {
     if (session) {
-      localStorage.setItem("mms_token", session.token);
+      if (session.token) {
+        localStorage.setItem("mms_token", session.token);
+      }
       localStorage.setItem("mms_user_session", JSON.stringify({
         role: session.role,
         matricule: session.matricule,
@@ -1155,12 +1226,30 @@ export default function App() {
         showToast("Le matricule est obligatoire pour la session technicien.", "error");
         return;
       }
-      const matchedTech = technicians.find(
+      let matchedTech = technicians.find(
         t => t.matricule.trim().toUpperCase() === userMatricule
       );
       if (!matchedTech) {
-        showToast("Ce matricule n'est pas enregistré comme Technicien autorisé par l'Administrateur.", "error");
-        return;
+        const newName = loginName.trim();
+        if (!newName) {
+          showToast("Le nom du technicien est obligatoire pour une nouvelle inscription.", "error");
+          return;
+        }
+        const created = { matricule: userMatricule, name: newName };
+        setTechnicians(prev => [...prev, created]);
+        matchedTech = created;
+        showToast(`Nouveau technicien enregistré : ${created.name} (${created.matricule})`, "success");
+
+        const sessionToken = session?.token || localStorage.getItem("mms_token") || API_TOKEN;
+        fetch("/api/technicians", {
+          method: "POST",
+          headers: sessionToken
+            ? { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` }
+            : authHeaders(),
+          body: JSON.stringify(created)
+        }).catch(err => {
+          console.error("Network error saving new technician on server", err);
+        });
       }
       
       try {

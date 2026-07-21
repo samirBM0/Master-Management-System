@@ -861,6 +861,102 @@ app.post("/api/auth/login", requireAuth, async (req, res) => {
   }
 });
 
+// --- Technicians persistence ---
+const TECHNICIANS_PATH = path.join(process.cwd(), "src", "technicians.json");
+
+const DEFAULT_TECHNICIANS = [
+  { matricule: "MTR01", name: "BEN MANSOUR Samir" },
+  { matricule: "MTR02", name: "DURAND Nicolas" }
+];
+
+function loadTechnicians() {
+  try {
+    if (!fs.existsSync(TECHNICIANS_PATH)) {
+      fs.writeFileSync(TECHNICIANS_PATH, JSON.stringify(DEFAULT_TECHNICIANS, null, 2), "utf-8");
+      return DEFAULT_TECHNICIANS;
+    }
+    const data = fs.readFileSync(TECHNICIANS_PATH, "utf-8");
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return DEFAULT_TECHNICIANS;
+    return parsed;
+  } catch (error) {
+    console.error("Error loading technicians:", error);
+    return DEFAULT_TECHNICIANS;
+  }
+}
+
+function saveTechnicians(techs: any[]) {
+  try {
+    fs.writeFileSync(TECHNICIANS_PATH, JSON.stringify(techs, null, 2), "utf-8");
+    return true;
+  } catch (error) {
+    console.error("Error saving technicians:", error);
+    return false;
+  }
+}
+
+app.get("/api/technicians", requireAuth, (req, res) => {
+  const techs = loadTechnicians();
+  res.json(techs);
+});
+
+app.post("/api/technicians", requireAuth, (req, res) => {
+  try {
+    const incoming = req.body;
+    if (!incoming || typeof incoming !== "object" || !incoming.matricule || !incoming.name) {
+      return res.status(400).json({ success: false, error: "Invalid technician data. 'matricule' and 'name' are required." });
+    }
+
+    const techs = loadTechnicians();
+    const mat = String(incoming.matricule).trim().toUpperCase();
+
+    if (techs.some(t => String(t.matricule).toUpperCase() === mat)) {
+      return res.json({ success: true, technicians: techs });
+    }
+
+    const newTech = { matricule: mat, name: String(incoming.name).trim() };
+    techs.push(newTech);
+    const success = saveTechnicians(techs);
+
+    if (success) {
+      res.json({ success: true, technicians: techs });
+    } else {
+      res.status(500).json({ success: false, error: "Failed to save technician." });
+    }
+  } catch (error: any) {
+    console.error("SERVER_TECHNICIAN_SAVE_ERROR:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/technicians/:matricule", requireAuth, (req, res) => {
+  try {
+    const { matricule } = req.params;
+    if (!matricule) {
+      return res.status(400).json({ success: false, error: "Matricule is required." });
+    }
+
+    const techs = loadTechnicians();
+    const mat = String(matricule).trim().toUpperCase();
+    const filtered = techs.filter(t => String(t.matricule).toUpperCase() !== mat);
+
+    if (filtered.length === techs.length) {
+      return res.json({ success: true, technicians: techs });
+    }
+
+    const success = saveTechnicians(filtered);
+
+    if (success) {
+      res.json({ success: true, technicians: filtered });
+    } else {
+      res.status(500).json({ success: false, error: "Failed to delete technician." });
+    }
+  } catch (error: any) {
+    console.error("SERVER_TECHNICIAN_DELETE_ERROR:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Secure admin verification (V8 remediation): compares against a server-side
 // hashed secret. Set ADMIN_CODE_HASH in .env to e.g. scrypt('your-code').
 // If unset, admin login is disabled (fail-closed).
