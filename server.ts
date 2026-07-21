@@ -15,8 +15,10 @@ dotenv.config();
 // __dirname / __filename shim: tsx runs this file as ESM (no __dirname), while
 // the production build compiles to CJS (where they exist). Resolve them from
 // import.meta.url so both execution modes work.
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+//const __filename = fileURLToPath(import.meta.url);
+//const __dirname = path.dirname(__filename);
+const __filename_shim = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : '');
+const __dirname_shim = typeof __dirname !== 'undefined' ? __dirname : (typeof import.meta !== 'undefined' && import.meta.url ? path.dirname(fileURLToPath(import.meta.url)) : process.cwd());
 
 // Unified resolver for xlsx module in CJS/ESM/tsx contexts
 const xlsxModule = XLSX.readFile ? XLSX : ((XLSX as any).default as any);
@@ -240,7 +242,7 @@ Renvoie un objet JSON respectant exactement le schéma suivant :
 // Both reading (loadMastersFromExcel) and writing (saveMastersToExcel) MUST
 // target exactly this path. Never write to any other file (e.g. test_out.xlsx).
 //const EXCEL_PATH = path.join(__dirname, "src", "FR 509-B Suivi pièces master.xlsx");
-const EXCEL_PATH = process.env.EXCEL_PATH || path.join(process.cwd(), "src", "FR 509-B Suivi pièces master.xlsx");
+const EXCEL_PATH = process.env.EXCEL_PATH || path.join(__dirname_shim || process.cwd(), "src", "FR 509-B Suivi pièces master.xlsx");
 // Explicit write path alias so it is crystal-clear which file is written.
 const EXCEL_WRITE_PATH = EXCEL_PATH;
 
