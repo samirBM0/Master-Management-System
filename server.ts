@@ -239,7 +239,8 @@ Renvoie un objet JSON respectant exactement le schéma suivant :
 // This is the single, authoritative Excel database used by the application.
 // Both reading (loadMastersFromExcel) and writing (saveMastersToExcel) MUST
 // target exactly this path. Never write to any other file (e.g. test_out.xlsx).
-const EXCEL_PATH = path.join(__dirname, "src", "FR 509-B Suivi pièces master.xlsx");
+//const EXCEL_PATH = path.join(__dirname, "src", "FR 509-B Suivi pièces master.xlsx");
+const EXCEL_PATH = process.env.EXCEL_PATH || path.join(process.cwd(), "src", "FR 509-B Suivi pièces master.xlsx");
 // Explicit write path alias so it is crystal-clear which file is written.
 const EXCEL_WRITE_PATH = EXCEL_PATH;
 
