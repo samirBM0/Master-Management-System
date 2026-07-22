@@ -1605,6 +1605,10 @@ export default function App() {
 
   // Update inputs when a master is selected for calculation
   const handleSelectMasterForCalculation = (item: MasterItem) => {
+    if (normalizeStatus(item.statut) !== "active" || item.verif !== "OK") {
+      showToast("Impossible de sélectionner ce master pour le calcul : le statut doit être ACTIVE et la vérification OK.", "error");
+      return;
+    }
     setCalcMasterId(item.idMaster);
     setCalcTester(item.testeur);
     setLogImportDetails(null);
@@ -3179,16 +3183,16 @@ export default function App() {
                             {/* Actions */}
                             <td className="py-4 px-6 text-right whitespace-nowrap">
                               <div className="flex items-center justify-end gap-2">
-                                {item.statut === "Active" && (
-                                  <button
-                                    onClick={() => handleSelectMasterForCalculation(item)}
-                                    className="text-slate-950 bg-sky-500 hover:bg-sky-400 font-bold px-3 py-1 rounded-none border border-sky-400 flex items-center gap-1 text-[10px] uppercase tracking-wider transition-all"
-                                    title="Calculer capabilité et répétabilité pour ce master"
-                                  >
-                                    <Calculator className="h-3 w-3" />
-                                    <span>Calculer</span>
-                                  </button>
-                                )}
+                                 {item.statut === "Active" && item.verif === "OK" && (
+                                   <button
+                                     onClick={() => handleSelectMasterForCalculation(item)}
+                                     className="text-slate-950 bg-sky-500 hover:bg-sky-400 font-bold px-3 py-1 rounded-none border border-sky-400 flex items-center gap-1 text-[10px] uppercase tracking-wider transition-all"
+                                     title="Calculer capabilité et répétabilité pour ce master"
+                                   >
+                                     <Calculator className="h-3 w-3" />
+                                     <span>Calculer</span>
+                                   </button>
+                                 )}
 
                                 {true ? (
                                   <>
@@ -3697,12 +3701,12 @@ export default function App() {
                         }
                       }}
                       className="w-full bg-slate-950 border border-slate-800 rounded-none px-3 py-2 text-xs text-sky-400 font-mono focus:outline-none focus:border-sky-500"
-                    >
-                      <option value="">-- Saisie manuelle sans master --</option>
-                      {masters.map((m, index) => (
-                        <option key={`${m.id}-${index}`} value={m.idMaster}>{m.idMaster} ({m.testeur})</option>
-                      ))}
-                    </select>
+                     >
+                       <option value="">-- Saisie manuelle sans master --</option>
+                       {masters.filter(m => normalizeStatus(m.statut) === 'active' && m.verif === 'OK').map((m, index) => (
+                         <option key={`${m.id}-${index}`} value={m.idMaster}>{m.idMaster} ({m.testeur})</option>
+                       ))}
+                     </select>
                   </div>
 
                   {/* Tester text */}

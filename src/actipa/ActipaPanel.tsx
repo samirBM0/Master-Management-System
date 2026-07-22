@@ -113,14 +113,15 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
     return localStorage.getItem("actipa_tester_name") || selectedMaster?.testeur || "";
   });
 
-  // Masters linked to the currently selected tester, excluding obsolete ones,
+  // Masters linked to the currently selected tester, only keeping ACTIVE and verified OK masters,
   // used to populate the dynamic "Référence Produit" dropdown.
   const masterOptionsForTester = useMemo(() => {
     if (!testerName) return [];
     return masters.filter(
       m =>
         m.testeur?.trim().toLowerCase() === testerName.trim().toLowerCase() &&
-        m.statut?.trim().toLowerCase() !== "obsolète"
+        m.statut?.trim().toLowerCase() === "active" &&
+        m.verif === "OK"
     );
   }, [testerName, masters]);
 
@@ -137,6 +138,15 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
       m => m.refProduitMaster?.trim().toLowerCase() === productRef.trim().toLowerCase()
     ) || null;
   }, [testerName, productRef, masterOptionsForTester]);
+
+  const noActiveMaster = useMemo(() => {
+    return !!testerName && masterOptionsForTester.length === 0;
+  }, [testerName, masterOptionsForTester]);
+
+  const selectedMasterNotActive = useMemo(() => {
+    if (!selectedMaster) return false;
+    return selectedMaster.statut?.trim().toLowerCase() !== "active" || selectedMaster.verif !== "OK";
+  }, [selectedMaster]);
 
   // Results state
   const [analysisRan, setAnalysisRan] = useState(() => {
@@ -302,12 +312,14 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
   };
 
   // Changing the tester/banc must reset the previously loaded files (and results)
-  // so a stale file list from another testeur is never reused.
+  // so a stale file from another testeur is never reused.
   const handleTesterChange = (value: string) => {
     setTesterName(value);
     const validMasters = masters.filter(
-      m => m.testeur?.trim().toLowerCase() === value.trim().toLowerCase() &&
-        m.statut?.trim().toLowerCase() !== "obsolète"
+      m =>
+        m.testeur?.trim().toLowerCase() === value.trim().toLowerCase() &&
+        m.statut?.trim().toLowerCase() === "active" &&
+        m.verif === "OK"
     );
     setProductRef(validMasters[0]?.refProduitMaster || "");
     clearFiles();
@@ -601,7 +613,7 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
                     {!testerName
                       ? "-- Sélectionnez d'abord un banc --"
                       : productRefOptions.length === 0
-                        ? "-- Aucune référence active pour ce banc --"
+                        ? "-- Aucun Master Active disponible pour ce banc --"
                         : "-- Choisir une référence produit --"}
                   </option>
                   {productRefOptions.map(ref => (
@@ -634,6 +646,18 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
                 </label>
               </div>
 
+              {selectedMasterNotActive && selectedMaster && (
+                <div className="p-3 bg-amber-950/40 border border-amber-700 text-amber-300 text-[10px] font-mono px-3 py-2 uppercase tracking-wide">
+                  <span className="font-bold">Attention :</span> Le master sélectionné ({selectedMaster.idMaster}) a un status "{selectedMaster.statut}" et vérification "{selectedMaster.verif}". Seuls les masters <span className="font-bold">ACTIVE</span> avec vérification <span className="font-bold">OK</span> sont autorisés pour le calcul automatique.
+                </div>
+              )}
+
+              {noActiveMaster && testerName && (
+                <div className="p-3 bg-rose-950/40 border border-rose-700 text-rose-300 text-[10px] font-mono px-3 py-2 uppercase tracking-wide">
+                  <span className="font-bold">Attention :</span> Aucun Master Active disponible pour ce banc.
+                </div>
+              )}
+
               {activeMaster && (
                 <div className="p-3 bg-slate-950 border border-slate-850 border-l-4 border-l-rose-500 text-[11px] leading-relaxed text-slate-400">
                   <div className="font-bold text-slate-200 uppercase text-[9px] tracking-wider mb-1">Master Lié</div>
@@ -647,9 +671,9 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
           <div className="border-t border-slate-900 pt-4 mt-6">
             <button
               onClick={runAnalysis}
-              disabled={files.length === 0}
+              disabled={files.length === 0 || !activeMaster}
               className={`w-full font-bold px-6 py-4 text-xs font-mono uppercase tracking-widest flex items-center justify-center gap-2 border transition-all ${
-                files.length > 0
+                files.length > 0 && activeMaster
                   ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-500 shadow-[0_0_15px_rgba(225,29,72,0.15)] cursor-pointer'
                   : 'bg-slate-950 text-slate-600 border-slate-900 cursor-not-allowed'
               }`}
