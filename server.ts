@@ -405,8 +405,34 @@ app.get("/actipa-templates/capa_report.xlsx", (req, res) => {
   res.sendFile(path.join(process.cwd(), "src", "capa_report.xlsx"));
 });
 
-app.get("/actipa-templates/repet_report.xlsx", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "src", "repet_report.xlsx"));
+app.get("/actipa-templates/repet_report.xlsx", async (req, res) => {
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'repet_report.xlsx'),
+      path.join(process.cwd(), "src", "repet_report.xlsx")
+    ];
+    const templatePath = candidates.find(p => fs.existsSync(p));
+    if (!templatePath) {
+      const wb = new ExcelJS.Workbook();
+      wb.addWorksheet("Header");
+      wb.addWorksheet("Raw Data");
+      const headerWs = wb.getWorksheet("Header");
+      if (headerWs) {
+        headerWs.getCell("D10").value = "";
+        headerWs.getCell("D11").value = "";
+        headerWs.getCell("C21").value = "";
+      }
+      const buffer = await wb.xlsx.writeBuffer();
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent("repet_report.xlsx")}`);
+      res.send(buffer);
+      return;
+    }
+    res.sendFile(templatePath);
+  } catch (err: any) {
+    console.error("Error serving repet_report.xlsx:", err);
+    res.status(500).json({ error: "L'exportation a échoué côté serveur.", details: err.message });
+  }
 });
 
 // Serve Actipa image assets from /src
@@ -567,9 +593,20 @@ app.post("/api/export/repeatability", requireAuth, async (req, res) => {
   try {
     const { results, rawMeasurements, productRef, testerName, operatorName, files, testName } = req.body;
     
-    const templatePath = path.join(process.cwd(), "src", "repet_report.xlsx");
+    const candidates = [
+      path.resolve(process.cwd(), 'repet_report.xlsx'),
+      path.join(process.cwd(), "src", "repet_report.xlsx")
+    ];
+    const templatePath = candidates.find(p => fs.existsSync(p));
+    
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(templatePath);
+    if (templatePath) {
+      await workbook.xlsx.readFile(templatePath);
+    } else {
+      console.warn(`repet_report.xlsx not found at expected paths. Creating fallback workbook dynamically.`);
+      workbook.addWorksheet("Header");
+      workbook.addWorksheet("Raw Data");
+    }
     
     const wsHeader = workbook.getWorksheet("Header");
     const wsRaw = workbook.getWorksheet("Raw Data");
@@ -675,8 +712,8 @@ app.post("/api/export/repeatability", requireAuth, async (req, res) => {
     
     res.json({ success: true, id });
   } catch (err: any) {
-    console.error("Error generating repeatability Excel:", err);
-    res.status(500).json({ error: "Failed to generate Excel report: " + err.message });
+    console.error("EXCEL EXPORT ERROR:", err);
+    res.status(500).json({ error: "L'exportation a échoué côté serveur.", details: err.message });
   }
 });
 
