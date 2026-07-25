@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+*.log
+npm-debug.log*
+test_out.xlsx
+*.pdf

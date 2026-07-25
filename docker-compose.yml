@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3005:3005"
+    volumes:
+      - ./src/technicians.json:/app/src/technicians.json
+      - ./repet_report.xlsx:/app/repet_report.xlsx
+    environment:
+      - NODE_ENV=production
+      - API_TOKEN=${API_TOKEN:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ADMIN_CODE_HASH=${ADMIN_CODE_HASH:-}
+      - VITE_API_TOKEN=${VITE_API_TOKEN:-}
+    restart: unless-stopped

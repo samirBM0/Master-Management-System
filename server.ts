@@ -31,6 +31,7 @@ const xlsxModule = XLSX.readFile ? XLSX : ((XLSX as any).default as any);
 const API_TOKEN = process.env.API_TOKEN;
 function requireAuth(req: any, res: any, next: any) {
   if (req.method === "OPTIONS") return next();
+  if (req.path === "/api/auth/login") return next();
 
   // In local development, relax the token check so local requests succeed
   // without a configured API_TOKEN / session token.
@@ -518,8 +519,23 @@ app.post("/api/export/capability", requireAuth, async (req, res) => {
     const { results, rawMeasurements, productRef, testerName, operatorName, isScMode, testName } = req.body;
     
     const templatePath = path.join(process.cwd(), "src", "capa_report.xlsx");
+    let templateFile: string | null = null;
+    try {
+      if (fs.statSync(templatePath).isFile()) {
+        templateFile = templatePath;
+      }
+    } catch {
+      templateFile = null;
+    }
+
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(templatePath);
+    if (templateFile) {
+      await workbook.xlsx.readFile(templateFile);
+    } else {
+      console.warn(`capa_report.xlsx not found at expected paths. Creating fallback workbook dynamically.`);
+      workbook.addWorksheet("Header");
+      workbook.addWorksheet("Raw Data");
+    }
     
     const wsHeader = workbook.getWorksheet("Header");
     const wsRaw = workbook.getWorksheet("Raw Data");
@@ -597,7 +613,13 @@ app.post("/api/export/repeatability", requireAuth, async (req, res) => {
       path.resolve(process.cwd(), 'repet_report.xlsx'),
       path.join(process.cwd(), "src", "repet_report.xlsx")
     ];
-    const templatePath = candidates.find(p => fs.existsSync(p));
+    const templatePath = candidates.find(p => {
+      try {
+        return fs.statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    });
     
     const workbook = new ExcelJS.Workbook();
     if (templatePath) {

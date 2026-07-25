@@ -2,34 +2,6 @@ import { MasterItem } from "./types";
 
 export const INITIAL_MASTER_DATA: MasterItem[] = [
   {
-    "id": "MASTER_453",
-    "testeur": "second test master",
-    "idMaster": "MASTER_453",
-    "refProduitMaster": "",
-    "numSerieProduitMaster": "",
-    "refCarteMaster": "",
-    "numSerieCarteMaster": "",
-    "dateCreation": "20/07/2026",
-    "commentaire1": "",
-    "statut": "Active",
-    "commentaire2": "",
-    "verif": "OK"
-  },
-  {
-    "id": "MASTER_455",
-    "testeur": "test creation new master",
-    "idMaster": "MASTER_455",
-    "refProduitMaster": "",
-    "numSerieProduitMaster": "",
-    "refCarteMaster": "",
-    "numSerieCarteMaster": "",
-    "dateCreation": "20/07/2026",
-    "commentaire1": "for test",
-    "statut": "Active",
-    "commentaire2": "",
-    "verif": "OK"
-  },
-  {
     "id": "MASTER_001",
     "testeur": "UFT TELIS",
     "idMaster": "MASTER_001",
