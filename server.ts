@@ -8,57 +8,13 @@ import dotenv from "dotenv";
 import * as XLSX from "xlsx";
 import ExcelJS from "exceljs";
 import { INITIAL_MASTER_DATA } from "./src/data";
-import { fileURLToPath } from "url";
+import { db, countUsers, createUser, getUserByMatricule, listTechnicians, deleteTechnician, revokeToken, purgeExpiredRevocations } from "./src/db";
+import { requireAuth, requireRole, signToken, hashPassword, comparePassword } from "./src/auth";
 
 dotenv.config();
 
-// __dirname / __filename shim: tsx runs this file as ESM (no __dirname), while
-// the production build compiles to CJS (where they exist). Resolve them from
-// import.meta.url so both execution modes work.
-//const __filename = fileURLToPath(import.meta.url);
-//const __dirname = path.dirname(__filename);
-const __filename_shim = typeof __filename !== 'undefined' ? __filename : (typeof import.meta !== 'undefined' && import.meta.url ? fileURLToPath(import.meta.url) : '');
-const __dirname_shim = typeof __dirname !== 'undefined' ? __dirname : (typeof import.meta !== 'undefined' && import.meta.url ? path.dirname(fileURLToPath(import.meta.url)) : process.cwd());
-
 // Unified resolver for xlsx module in CJS/ESM/tsx contexts
 const xlsxModule = XLSX.readFile ? XLSX : ((XLSX as any).default as any);
-
-// --- Security: API authentication (Bearer token) ---
-// Set API_TOKEN in your .env. All /api routes require a valid Bearer token.
-// The token may be either the static API_TOKEN OR a signed session token
-// (issued at login, carrying a role claim). This supports the client-side
-// technician/admin sessions which send the opaque signed session JWT.
-const API_TOKEN = process.env.API_TOKEN;
-function requireAuth(req: any, res: any, next: any) {
-  if (req.method === "OPTIONS") return next();
-  if (req.path === "/api/auth/login") return next();
-
-  // In local development, relax the token check so local requests succeed
-  // without a configured API_TOKEN / session token.
-  // Trim to tolerate trailing spaces from `set NODE_ENV=development` on Windows.
-  const nodeEnv = (process.env.NODE_ENV || "").trim();
-  if (nodeEnv === "development" || nodeEnv === "dev" || nodeEnv === "") {
-    return next();
-  }
-
-  const auth = req.headers["authorization"] || "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) {
-    return res.status(401).json({ error: "Non autorisé" });
-  }
-  const token = m[1];
-  // Accept the static API_TOKEN ...
-  if (API_TOKEN && token === API_TOKEN) {
-    return next();
-  }
-  // ... or any validly signed session token (admin or technician).
-  const claims = verifyToken(token);
-  if (claims && (claims.role === "admin" || claims.role === "technician")) {
-    req.auth = claims;
-    return next();
-  }
-  return res.status(401).json({ error: "Non autorisé" });
-}
 
 // Strip Excel/CSV formula-injection prefixes before writing to a cell
 function safeCell(value: unknown): string {
@@ -95,12 +51,32 @@ const PORT = 3005;
 
 // Security: per-route body size + basic rate limiting on the API surface
 app.use("/api/", (req, res, next) => {
-  const whitelist = ["/api/export/prepare-generic", "/api/export/capability", "/api/export/repeatability"];
-  const limit = whitelist.includes(req.path) ? "20mb" : "2mb";
-  express.json({ limit })(req, res, (err1: any) => {
-    if (err1) return res.status(413).json({ error: "Payload trop volumineux." });
-    express.urlencoded({ limit, extended: true })(req, res, (err2: any) => {
-      if (err2) return res.status(413).json({ error: "Payload trop volumineux." });
+  // express.json/urlencoded are applied as app.use("/api/"), so Express strips the
+  // "/api/" mount prefix from req.path (e.g. "/export/capability"). Build the path
+  // against both the stripped form and the original URL so the whitelist resolves
+  // correctly regardless of how the middleware is mounted.
+  const reqPath = (req.path || "").replace(/\/+$/, "");
+  const reqFull = (req.originalUrl || req.url || "").split("?")[0].replace(/\/+$/, "");
+  const whitelist = ["/export/prepare-generic", "/export/capability", "/export/repeatability",
+    "/api/export/prepare-generic", "/api/export/capability", "/api/export/repeatability"];
+  const limit = (whitelist.includes(reqPath) || whitelist.includes(reqFull)) ? "20mb" : "2mb";
+  const jsonOpts = express.json({ limit });
+  jsonOpts(req, res, (err1: any) => {
+    if (err1) {
+      // entity.too.large -> 413, anything else (e.g. JSON syntax) -> 400 Bad Request
+      if (err1.status === 413 || err1.type === "entity.too.large") {
+        return res.status(413).json({ error: "Payload trop volumineux." });
+      }
+      return res.status(400).json({ error: "Corps de requête invalide: " + (err1.message || "JSON invalide") });
+    }
+    const urlencodedOpts = express.urlencoded({ limit, extended: true });
+    urlencodedOpts(req, res, (err2: any) => {
+      if (err2) {
+        if (err2.status === 413 || err2.type === "entity.too.large") {
+          return res.status(413).json({ error: "Payload trop volumineux." });
+        }
+        return res.status(400).json({ error: "Corps de requête invalide: " + (err2.message || "données invalide") });
+      }
       next();
     });
   });
@@ -239,12 +215,14 @@ Renvoie un objet JSON respectant exactement le schéma suivant :
 });
 
 // Path to the master excel file
-// This is the single, authoritative Excel database used by the application.
-// Both reading (loadMastersFromExcel) and writing (saveMastersToExcel) MUST
-// target exactly this path. Never write to any other file (e.g. test_out.xlsx).
-//const EXCEL_PATH = path.join(__dirname, "src", "FR 509-B Suivi pièces master.xlsx");
-const EXCEL_PATH = process.env.EXCEL_PATH || path.join(__dirname_shim || process.cwd(), "src", "FR 509-B Suivi pièces master.xlsx");
-// Explicit write path alias so it is crystal-clear which file is written.
+// Data directory: resolve relative to the server file itself (via __dirname_shim)
+// rather than process.cwd(), so file paths stay correct inside the Docker container
+// where the working directory is the image WORKDIR (/app). This keeps the Excel
+// database and technicians.json accessible regardless of the current working dir.
+// Source-data directory (Excel master DB + report templates + assets).
+// Resolved against the working directory so it maps to /app/src inside Docker.
+const DATA_DIR = path.join(process.cwd(), "src");
+const EXCEL_PATH = process.env.EXCEL_PATH || path.join(DATA_DIR, "FR 509-B Suivi pièces master.xlsx");
 const EXCEL_WRITE_PATH = EXCEL_PATH;
 
 // Helper to update /src/data.ts file with latest master items to keep it in sync
@@ -403,14 +381,14 @@ function resyncMastersToDataSource(): any[] {
 
 // Serve Excel report templates
 app.get("/actipa-templates/capa_report.xlsx", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "src", "capa_report.xlsx"));
+  res.sendFile(path.join(DATA_DIR, "capa_report.xlsx"));
 });
 
 app.get("/actipa-templates/repet_report.xlsx", async (req, res) => {
   try {
     const candidates = [
       path.resolve(process.cwd(), 'repet_report.xlsx'),
-      path.join(process.cwd(), "src", "repet_report.xlsx")
+      path.join(DATA_DIR, 'repet_report.xlsx')
     ];
     const templatePath = candidates.find(p => fs.existsSync(p));
     if (!templatePath) {
@@ -451,7 +429,7 @@ app.get("/actipa-assets/:filename", (req, res) => {
   ];
   const filename = req.params.filename;
   if (allowed.includes(filename)) {
-    res.sendFile(path.join(process.cwd(), "src", filename));
+    res.sendFile(path.join(DATA_DIR, filename));
   } else {
     res.status(404).send("Not found");
   }
@@ -518,7 +496,7 @@ app.post("/api/export/capability", requireAuth, async (req, res) => {
   try {
     const { results, rawMeasurements, productRef, testerName, operatorName, isScMode, testName } = req.body;
     
-    const templatePath = path.join(process.cwd(), "src", "capa_report.xlsx");
+    const templatePath = path.join(DATA_DIR, "capa_report.xlsx");
     let templateFile: string | null = null;
     try {
       if (fs.statSync(templatePath).isFile()) {
@@ -611,7 +589,7 @@ app.post("/api/export/repeatability", requireAuth, async (req, res) => {
     
     const candidates = [
       path.resolve(process.cwd(), 'repet_report.xlsx'),
-      path.join(process.cwd(), "src", "repet_report.xlsx")
+      path.join(DATA_DIR, 'repet_report.xlsx')
     ];
     const templatePath = candidates.find(p => {
       try {
@@ -854,188 +832,161 @@ app.post("/api/masters/new", requireAuth, (req, res) => {
   }
 });
 
-// --- Opaque signed session token (V9 remediation) ---
-// Tokens are HMAC-signed (not stored server-side). Payload carries the role
-// claim; the client stores ONLY the opaque token, never the identity object.
-const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString("hex");
+// ---------------------------------------------------------------------------
+// Authentication, session & user-management routes (SQLite-backed).
+// Passwords are hashed with bcryptjs (per-user random salt) and stored ONLY as
+// `password_hash` in the `users` table (see src/db.ts). Sessions are stateless
+// JWTs (HS256) carrying { role, matricule, name, jti, exp }; logout revokes the
+// token's `jti` in the SQLite `revoked_tokens` table so it cannot be reused.
+//
+// The old file-based auth (technicians.json + ADMIN_CODE_HASH env secret) has
+// been removed: the `users` table is now the single source of truth.
+// ---------------------------------------------------------------------------
 
-function signToken(payload: object): string {
-  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto.createHmac("sha256", TOKEN_SECRET).update(`${header}.${body}`).digest("base64url");
-  return `${header}.${body}.${sig}`;
+// Default seed credentials, overridable via env for first-boot flexibility.
+// They are ONLY inserted when the `users` table is empty, and must be rotated
+// after the first login (a warning is logged at startup).
+const DEFAULT_TECH_PASSWORD = process.env.SEED_TECH_PASSWORD || "Technicien2024!";
+const DEFAULT_ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "Admin2024!";
+
+// Seed default technicians + an admin on first startup so the system is usable
+// immediately. Existing accounts are never overwritten (seeding is idempotent).
+function seedUsersIfEmpty() {
+  if (countUsers() > 0) return;
+  const seed: Array<{ matricule: string; nom: string; role: "technician" | "admin" }> = [
+    { matricule: "366", nom: "BEN MANSOUR Samir", role: "technician" },
+    { matricule: "195", nom: "BEN GHODHBENE Hamza", role: "technician" },
+    { matricule: "122", nom: "TECH", role: "technician" },
+    { matricule: "ADM01", nom: "ADMINISTRATEUR METROLOGIE", role: "admin" },
+  ];
+  for (const u of seed) {
+    createUser({ matricule: u.matricule, nom: u.nom, role: u.role, passwordHash: hashPassword(u.role === "admin" ? DEFAULT_ADMIN_PASSWORD : DEFAULT_TECH_PASSWORD) });
+  }
+  console.log(`[auth] Base initialisée: ${seed.length} utilisateurs créés (admin: ${DEFAULT_ADMIN_PASSWORD}, technicien: ${DEFAULT_TECH_PASSWORD}).`);
+  console.warn("[auth] CHANGEZ les mots de passe par défaut après le premier lancement.");
 }
 
-function verifyToken(token: string): any | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [header, body, sig] = parts;
-  const expected = crypto.createHmac("sha256", TOKEN_SECRET).update(`${header}.${body}`).digest("base64url");
-  const a = Buffer.from(sig), b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  try { return JSON.parse(Buffer.from(body, "base64url").toString()); }
-  catch { return null; }
-}
-
-// Role-gated middleware built on top of requireAuth
-function requireRole(role: "admin" | "technician") {
-  return (req: any, res: any, next: any) => {
-    const auth = req.headers["authorization"] || "";
-    const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (!m) return res.status(401).json({ error: "Non autorisé" });
-    const claims = verifyToken(m[1]);
-    if (!claims || claims.role !== role) {
-      return res.status(403).json({ error: "Accès refusé: privilège insuffisant." });
-    }
-    req.auth = claims;
-    next();
-  };
-}
-
-// Login: returns an opaque signed token carrying the role claim.
+// POST /api/auth/login  -- public (requireAuth exempts this route on every env).
+// Body: { matricule, password, role? }  role defaults to 'technician'.
+// Returns { token, user } on success.
 app.post("/api/auth/login", requireAuth, async (req, res) => {
   try {
-    const { matricule, code, role } = req.body;
-    if (role === "admin") {
-      const expectedHash = process.env.ADMIN_CODE_HASH;
-      if (!expectedHash || typeof code !== "string" || code.length === 0 || code.length > 200) {
-        return res.status(401).json({ error: "Non autorisé" });
-      }
-      const computed = crypto.scryptSync(code, "actia-metro-salt", 32).toString("hex");
-      const a = Buffer.from(computed, "hex"), b = Buffer.from(expectedHash, "hex");
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        return res.status(401).json({ error: "Non autorisé" });
-      }
-      const token = signToken({ role: "admin", matricule, iat: Date.now() });
-      return res.json({ token, user: { role: "admin", matricule } });
-    }
-    // technician: matricule must be in the authorized list (server-side source of truth)
+    const { matricule, password, role } = req.body || {};
+
     if (!matricule || typeof matricule !== "string") {
-      return res.status(401).json({ error: "Non autorisé" });
+      return res.status(400).json({ error: "Le matricule est requis." });
     }
-    const token = signToken({ role: "technician", matricule, iat: Date.now() });
-    return res.json({ token, user: { role: "technician", matricule } });
-  } catch {
-    res.status(500).json({ error: "Erreur serveur" });
+    if (!password || typeof password !== "string") {
+      return res.status(400).json({ error: "Le mot de passe est requis." });
+    }
+    // A technician cannot authenticate as admin and vice-versa.
+    const requestedRole: "technician" | "admin" = role === "admin" ? "admin" : "technician";
+
+    const user = getUserByMatricule(matricule);
+    // Single, non-revealing failure message to avoid user-enumeration.
+    if (!user || user.role !== requestedRole || !comparePassword(password, user.password_hash)) {
+      return res.status(401).json({ error: "Matricule ou mot de passe incorrect." });
+    }
+
+    const token = signToken({ role: user.role, matricule: user.matricule, name: user.nom });
+    return res.json({ token, user: { role: user.role, matricule: user.matricule, name: user.nom } });
+  } catch (error: any) {
+    console.error("SERVER_LOGIN_ERROR:", error);
+    return res.status(500).json({ error: "Erreur serveur lors de la connexion.", details: error?.message || "Erreur interne" });
   }
 });
 
-// --- Technicians persistence ---
-const TECHNICIANS_PATH = path.join(process.cwd(), "src", "technicians.json");
-
-const DEFAULT_TECHNICIANS = [
-  { matricule: "MTR01", name: "BEN MANSOUR Samir" },
-  { matricule: "MTR02", name: "DURAND Nicolas" }
-];
-
-function loadTechnicians() {
+// POST /api/auth/logout -- invalidate the current session token (server-side).
+app.post("/api/auth/logout", requireAuth, (req: any, res: any) => {
   try {
-    if (!fs.existsSync(TECHNICIANS_PATH)) {
-      fs.writeFileSync(TECHNICIANS_PATH, JSON.stringify(DEFAULT_TECHNICIANS, null, 2), "utf-8");
-      return DEFAULT_TECHNICIANS;
+    const claims = req.auth;
+    if (claims && claims.jti) {
+      revokeToken(claims.jti, claims.exp || 0);
     }
-    const data = fs.readFileSync(TECHNICIANS_PATH, "utf-8");
-    const parsed = JSON.parse(data);
-    if (!Array.isArray(parsed)) return DEFAULT_TECHNICIANS;
-    return parsed;
-  } catch (error) {
-    console.error("Error loading technicians:", error);
-    return DEFAULT_TECHNICIANS;
+    return res.json({ success: true, message: "Déconnexion réussie." });
+  } catch (error: any) {
+    console.error("SERVER_LOGOUT_ERROR:", error);
+    return res.status(500).json({ error: "Erreur lors de la déconnexion.", details: error?.message || "Erreur interne" });
   }
-}
-
-function saveTechnicians(techs: any[]) {
-  try {
-    fs.writeFileSync(TECHNICIANS_PATH, JSON.stringify(techs, null, 2), "utf-8");
-    return true;
-  } catch (error) {
-    console.error("Error saving technicians:", error);
-    return false;
-  }
-}
-
-app.get("/api/technicians", requireAuth, (req, res) => {
-  const techs = loadTechnicians();
-  res.json(techs);
 });
 
-app.post("/api/technicians", requireAuth, (req, res) => {
+// GET /api/auth/session -- return the authenticated user (or 401).
+app.get("/api/auth/session", requireAuth, (req: any, res: any) => {
   try {
-    const incoming = req.body;
-    if (!incoming || typeof incoming !== "object" || !incoming.matricule || !incoming.name) {
-      return res.status(400).json({ success: false, error: "Invalid technician data. 'matricule' and 'name' are required." });
+    const claims = req.auth;
+    return res.json({ user: { role: claims.role, matricule: claims.matricule, name: claims.name } });
+  } catch (error: any) {
+    return res.status(500).json({ error: "Erreur serveur.", details: error?.message || "Erreur interne" });
+  }
+});
+
+// Re-verify an administrator's password before a sensitive action (replaces the
+// old ADMIN_CODE_HASH env-secret: the password now lives in the users table).
+app.post("/api/auth/admin-verify", requireAuth, async (req: any, res: any) => {
+  try {
+    const claims = req.auth;
+    if (claims.role !== "admin") {
+      return res.status(403).json({ error: "Accès refusé: privilège administrateur requis." });
     }
-
-    const techs = loadTechnicians();
-    const mat = String(incoming.matricule).trim().toUpperCase();
-
-    if (techs.some(t => String(t.matricule).toUpperCase() === mat)) {
-      return res.json({ success: true, technicians: techs });
+    const { code } = req.body || {};
+    if (typeof code !== "string" || code.length === 0 || code.length > 200) {
+      return res.status(401).json({ error: "Code incorrect." });
     }
-
-    const newTech = { matricule: mat, name: String(incoming.name).trim() };
-    techs.push(newTech);
-    const success = saveTechnicians(techs);
-
-    if (success) {
-      res.json({ success: true, technicians: techs });
-    } else {
-      res.status(500).json({ success: false, error: "Failed to save technician." });
+    const user = getUserByMatricule(claims.matricule);
+    if (!user || !comparePassword(code, user.password_hash)) {
+      return res.status(401).json({ error: "Code incorrect." });
     }
+    return res.json({ success: true });
+  } catch (error: any) {
+    console.error("SERVER_ADMIN_VERIFY_ERROR:", error);
+    return res.status(500).json({ error: "Erreur serveur.", details: error?.message || "Erreur interne" });
+  }
+});
+
+// --- Technicians management (SQLite-backed) ---
+// Public list of technicians is intentionally reachable without auth so the
+// login screen can display available accounts. Only matricule + name are
+// returned (never the password hash).
+app.get("/api/technicians", (req, res) => {
+  try {
+    res.json(listTechnicians());
+  } catch (error: any) {
+    console.error("SERVER_TECHNICIANS_LIST_ERROR:", error);
+    res.status(500).json({ error: error.message || "Erreur serveur" });
+  }
+});
+
+// Create a technician. Admin-only (role-gated).
+app.post("/api/technicians", requireRole("admin"), (req, res) => {
+  try {
+    const { matricule, name, password } = req.body || {};
+    if (!matricule || !name || !password) {
+      return res.status(400).json({ success: false, error: "Matricule, nom et mot de passe sont requis." });
+    }
+    if (getUserByMatricule(matricule)) {
+      return res.status(409).json({ success: false, error: "Un utilisateur avec ce matricule existe déjà." });
+    }
+    createUser({ matricule, nom: name, role: "technician", passwordHash: hashPassword(password) });
+    res.json({ success: true, technicians: listTechnicians() });
   } catch (error: any) {
     console.error("SERVER_TECHNICIAN_SAVE_ERROR:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message || "Erreur serveur" });
   }
 });
 
-app.delete("/api/technicians/:matricule", requireAuth, (req, res) => {
+// Delete a technician. Admin-only (role-gated).
+app.delete("/api/technicians/:matricule", requireRole("admin"), (req, res) => {
   try {
     const { matricule } = req.params;
     if (!matricule) {
-      return res.status(400).json({ success: false, error: "Matricule is required." });
+      return res.status(400).json({ success: false, error: "Matricule requis." });
     }
-
-    const techs = loadTechnicians();
-    const mat = String(matricule).trim().toUpperCase();
-    const filtered = techs.filter(t => String(t.matricule).toUpperCase() !== mat);
-
-    if (filtered.length === techs.length) {
-      return res.json({ success: true, technicians: techs });
-    }
-
-    const success = saveTechnicians(filtered);
-
-    if (success) {
-      res.json({ success: true, technicians: filtered });
-    } else {
-      res.status(500).json({ success: false, error: "Failed to delete technician." });
-    }
+    const ok = deleteTechnician(matricule);
+    if (!ok) return res.status(404).json({ success: false, error: "Technicien introuvable." });
+    res.json({ success: true, technicians: listTechnicians() });
   } catch (error: any) {
     console.error("SERVER_TECHNICIAN_DELETE_ERROR:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Secure admin verification (V8 remediation): compares against a server-side
-// hashed secret. Set ADMIN_CODE_HASH in .env to e.g. scrypt('your-code').
-// If unset, admin login is disabled (fail-closed).
-app.post("/api/auth/admin-verify", requireAuth, async (req, res) => {
-  try {
-    const { code } = req.body;
-    const expectedHash = process.env.ADMIN_CODE_HASH;
-    if (!expectedHash || typeof code !== "string" || code.length === 0 || code.length > 200) {
-      return res.status(401).json({ error: "Non autorisé" });
-    }
-    const computed = crypto.scryptSync(code, "actia-metro-salt", 32).toString("hex");
-    // constant-time comparison
-    const a = Buffer.from(computed, "hex");
-    const b = Buffer.from(expectedHash, "hex");
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return res.status(401).json({ error: "Non autorisé" });
-    }
-    res.json({ success: true });
-  } catch {
-    res.status(500).json({ error: "Erreur serveur" });
+    res.status(500).json({ error: error.message || "Erreur serveur" });
   }
 });
 
@@ -1043,6 +994,9 @@ app.post("/api/auth/admin-verify", requireAuth, async (req, res) => {
 async function startServer() {
   console.log("Initializing database/Excel sync to /src/data.ts on startup...");
   loadMastersFromExcel();
+  // Initialize the SQLite user store & seed default accounts on first boot.
+  purgeExpiredRevocations();
+  seedUsersIfEmpty();
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

@@ -6,6 +6,8 @@ services:
     volumes:
       - ./src/technicians.json:/app/src/technicians.json
       - ./repet_report.xlsx:/app/repet_report.xlsx
+      - ./test_out.xlsx:/app/test_out.xlsx
+      - ./metadata.json:/app/metadata.json
     environment:
       - NODE_ENV=production
       - API_TOKEN=${API_TOKEN:-}

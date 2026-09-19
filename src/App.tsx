@@ -956,45 +956,55 @@ export default function App() {
   // State for modification modal
   const [masterToEdit, setMasterToEdit] = useState<MasterItem | null>(null);
   
-  // User Session Management (V9: restore from opaque token + identity cache)
+  // User Session Management: restore from the persisted JWT + cached identity.
+  // The token itself is validated against /api/auth/session on mount so a
+  // revoked / expired session is cleared even if the cookie/storage lingered.
   const [session, setSession] = useState<UserSession | null>(() => {
     const token = (typeof localStorage !== "undefined") ? localStorage.getItem("mms_token") : null;
     const savedIdentity = (typeof localStorage !== "undefined") ? localStorage.getItem("mms_user_session") : null;
 
-    let role: string | undefined;
-    let matricule: string | undefined;
-    let name: string | undefined;
-
-    if (savedIdentity) {
-      try {
-        const parsed = JSON.parse(savedIdentity);
-        role = parsed.role;
-        matricule = parsed.matricule;
-        name = parsed.name;
-      } catch (e) {
-        console.error("Error reading saved user session", e);
-      }
-    }
-
-    if (token) {
-      const claims = decodeV9Token(token);
-      if (claims && claims.role && claims.matricule) {
-        return {
-          role: claims.role,
-          matricule: claims.matricule,
-          name: name || "",
-          token
-        };
-      }
+    if (!token) {
       localStorage.removeItem("mms_token");
+      localStorage.removeItem("mms_user_session");
+      return null;
     }
 
-    if (role && matricule) {
-      return { role, matricule, name: name || "", token: "" };
+    // Local decode only checks the token shape; authoritative validity is checked
+    // by the /api/auth/session effect below (handles expiry + revocation).
+    const claims = decodeV9Token(token);
+    if (!claims || !claims.role || !claims.matricule) {
+      localStorage.removeItem("mms_token");
+      localStorage.removeItem("mms_user_session");
+      return null;
     }
 
-    return null;
+    let name = claims.name || "";
+    if (!name && savedIdentity) {
+      try { name = JSON.parse(savedIdentity).name || ""; } catch {}
+    }
+    return {
+      role: claims.role as UserSession["role"],
+      matricule: claims.matricule,
+      name,
+      token
+    };
   });
+
+  // Authoritatively validate the restored session against the server. If the token
+  // is invalid/expired/revoked, clear it so the user lands back on the login screen.
+  useEffect(() => {
+    const token = (typeof localStorage !== "undefined") ? localStorage.getItem("mms_token") : null;
+    if (!token) return;
+    fetch("/api/auth/session", { headers: authHeaders() })
+      .then(res => {
+        if (!res.ok) {
+          setSession(null);
+          localStorage.removeItem("mms_token");
+          localStorage.removeItem("mms_user_session");
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Authorized Technicians State: initialize from defaults, then fetch from server
   const [technicians, setTechnicians] = useState<{ matricule: string; name: string }[]>(() => {
@@ -1194,8 +1204,7 @@ export default function App() {
   // Login form fields state
   const [loginRole, setLoginRole] = useState<'admin' | 'technician'>('technician');
   const [loginMatricule, setLoginMatricule] = useState("");
-  const [loginName, setLoginName] = useState("");
-  const [loginAdminCode, setLoginAdminCode] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
 
   // Keep track of session in localStorage and update operator
   useEffect(() => {
@@ -1217,63 +1226,54 @@ export default function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    let token: string | null = null;
+
     const userMatricule = loginMatricule.trim().toUpperCase();
-    
+
+    // Centralized login: sends { matricule, password, role } to /api/auth/login and
+    // surfaces the server's explicit JSON error message instead of a generic toast.
+    const doLogin = async (payload: { matricule: string; password: string; role: string }): Promise<{ token: string; user: UserSession } | null> => {
+      let res: Response;
+      try {
+        res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(payload)
+        });
+      } catch (err: any) {
+        showToast(`Échec de connexion au serveur: ${err?.message || "erreur réseau"}`, "error");
+        return null;
+      }
+      if (!res.ok) {
+        let detail = "";
+        try { const j = await res.json(); detail = j.error || ""; } catch { try { detail = await res.text(); } catch {} }
+        showToast(`Échec de l'authentification auprès du serveur (${res.status}): ${detail || "accès refusé"}`, "error");
+        return null;
+      }
+      let data: any;
+      try { data = await res.json(); } catch { showToast("Réponse d'authentification invalide (JSON invalide).", "error"); return null; }
+      if (!data.token || !data.user) {
+        showToast("Réponse d'authentification invalide: jeton ou utilisateur manquant.", "error");
+        return null;
+      }
+      return { token: data.token, user: data.user };
+    };
+
     if (loginRole === 'technician') {
       if (!userMatricule) {
         showToast("Le matricule est obligatoire pour la session technicien.", "error");
         return;
       }
-      let matchedTech = technicians.find(
-        t => t.matricule.trim().toUpperCase() === userMatricule
-      );
-      if (!matchedTech) {
-        const newName = loginName.trim();
-        if (!newName) {
-          showToast("Le nom du technicien est obligatoire pour une nouvelle inscription.", "error");
-          return;
-        }
-        const created = { matricule: userMatricule, name: newName };
-        setTechnicians(prev => [...prev, created]);
-        matchedTech = created;
-        showToast(`Nouveau technicien enregistré : ${created.name} (${created.matricule})`, "success");
-
-        const sessionToken = session?.token || localStorage.getItem("mms_token") || API_TOKEN;
-        fetch("/api/technicians", {
-          method: "POST",
-          headers: sessionToken
-            ? { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` }
-            : authHeaders(),
-          body: JSON.stringify(created)
-        }).catch(err => {
-          console.error("Network error saving new technician on server", err);
-        });
-      }
-      
-      try {
-        const res = await fetch("/api/auth/login", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            matricule: userMatricule,
-            role: "technician"
-          })
-        });
-        if (!res.ok) throw new Error("Technician login failed");
-        const data = await res.json();
-        token = data.token;
-      } catch {
-        showToast("Échec de l'authentification auprès du serveur.", "error");
+      if (!loginPassword) {
+        showToast("Le mot de passe est obligatoire.", "error");
         return;
       }
-      
+      const result = await doLogin({ matricule: userMatricule, password: loginPassword, role: "technician" });
+      if (!result) return;
       const newSession: UserSession = {
         role: 'technician',
-        matricule: matchedTech.matricule,
-        name: matchedTech.name,
-        token: token!
+        matricule: result.user.matricule,
+        name: result.user.name,
+        token: result.token
       };
       setSession(newSession);
       showToast(`Session Technicien activée : ${newSession.name} (${newSession.matricule})`, "success");
@@ -1282,34 +1282,17 @@ export default function App() {
         showToast("Le matricule Admin est obligatoire.", "error");
         return;
       }
-      if (!loginAdminCode.trim()) {
-        showToast("Le code d'accès Admin est obligatoire.", "error");
+      if (!loginPassword) {
+        showToast("Le mot de passe est obligatoire.", "error");
         return;
       }
-      
-      try {
-        const res = await fetch("/api/auth/login", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            matricule: userMatricule,
-            code: loginAdminCode,
-            role: "admin"
-          })
-        });
-        if (!res.ok) throw new Error("Admin login failed");
-        const data = await res.json();
-        token = data.token;
-      } catch {
-        showToast("Code d'accès Admin incorrect ou erreur serveur.", "error");
-        return;
-      }
-      
+      const result = await doLogin({ matricule: userMatricule, password: loginPassword, role: "admin" });
+      if (!result) return;
       const newSession: UserSession = {
         role: 'admin',
-        matricule: userMatricule,
-        name: loginName.trim() || "ADMIN METROLOGIE",
-        token: token!
+        matricule: result.user.matricule,
+        name: result.user.name,
+        token: result.token
       };
       setSession(newSession);
       showToast(`Session Administrateur activée ! Accès complet autorisé.`, "success");
@@ -1317,12 +1300,15 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    const token = session?.token || localStorage.getItem("mms_token");
+    if (token) {
+      fetch("/api/auth/logout", { method: "POST", headers: authHeaders() }).catch(() => {});
+    }
     setSession(null);
     localStorage.removeItem("mms_token");
     localStorage.removeItem("mms_user_session");
     setLoginMatricule("");
-    setLoginName("");
-    setLoginAdminCode("");
+    setLoginPassword("");
     showToast("Déconnexion réussie. Session fermée.", "info");
   };
   
@@ -2235,7 +2221,7 @@ export default function App() {
               onClick={() => {
                 setLoginRole('technician');
                 setLoginMatricule("");
-                setLoginName("");
+                setLoginPassword("");
               }}
               className={`py-3 text-xs uppercase font-bold tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer ${
                 loginRole === 'technician'
@@ -2251,7 +2237,7 @@ export default function App() {
               onClick={() => {
                 setLoginRole('admin');
                 setLoginMatricule("");
-                setLoginName("");
+                setLoginPassword("");
               }}
               className={`py-3 text-xs uppercase font-bold tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer ${
                 loginRole === 'admin'
@@ -2277,14 +2263,9 @@ export default function App() {
                   onChange={(e) => {
                     const selectedMat = e.target.value;
                     if (selectedMat) {
-                      const found = technicians.find(t => t.matricule === selectedMat);
-                      if (found) {
-                        setLoginMatricule(found.matricule);
-                        setLoginName(found.name);
-                      }
+                      setLoginMatricule(selectedMat);
                     } else {
                       setLoginMatricule("");
-                      setLoginName("");
                     }
                   }}
                   className="w-full bg-slate-950 border border-slate-800 rounded-none px-3 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
@@ -2299,69 +2280,48 @@ export default function App() {
               </div>
             )}
 
-            {/* Common Matricule Input */}
-            <div>
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
-                {loginRole === 'admin' ? "Matricule Admin *" : "Matricule Technicien *"}
-              </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
-                  <Key className="h-4 w-4" />
-                </span>
-                <input
-                  type="text"
-                  placeholder={loginRole === 'admin' ? "Ex: ADM01" : "Ex: MTR9823"}
-                  value={loginMatricule}
-                  onChange={(e) => setLoginMatricule(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-none pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-600 font-mono focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
-                  required
-                />
-              </div>
-            </div>
-
-            {/* Name Input - Required for Tech, Optional for Admin */}
-            <div>
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
-                {loginRole === 'admin' ? "Nom de l'Administrateur (Optionnel)" : "Nom du Technicien *"}
-              </label>
-              <div className="relative">
-                <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
-                  <User className="h-4 w-4" />
-                </span>
-                <input
-                  type="text"
-                  placeholder="Ex: BEN MANSOUR Samir"
-                  value={loginName}
-                  onChange={(e) => setLoginName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-none pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-600 font-mono focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
-                  required={loginRole === 'technician'}
-                />
-              </div>
-            </div>
-
-            {/* Admin Code Password Input (Only for Admin) */}
+            {/* Matricule Input - Admin only (technician uses the selection dropdown above) */}
             {loginRole === 'admin' && (
               <div className="animate-fadeIn">
-                <div className="flex justify-between mb-1.5">
-                  <label className="block text-[10px] font-bold text-amber-400 uppercase tracking-widest">
-                    Code d'accès Admin *
-                  </label>
-                </div>
+                <label className="block text-[10px] font-bold text-amber-400 uppercase tracking-widest mb-1.5">
+                  Matricule Administrateur *
+                </label>
                 <div className="relative">
-                  <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-amber-500/70">
-                    <Lock className="h-4 w-4" />
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
+                    <Key className="h-4 w-4" />
                   </span>
                   <input
-                    type="password"
-                    placeholder="Saisir le code d'accès"
-                    value={loginAdminCode}
-                    onChange={(e) => setLoginAdminCode(e.target.value)}
+                    type="text"
+                    placeholder="Ex: ADM01"
+                    value={loginMatricule}
+                    onChange={(e) => setLoginMatricule(e.target.value)}
                     className="w-full bg-slate-950 border border-amber-900/30 rounded-none pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-600 font-mono focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
                     required
                   />
                 </div>
               </div>
             )}
+
+            {/* Password Input - Required for both technician and admin login */}
+            <div>
+              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">
+                Mot de Passe *
+              </label>
+              <div className="relative">
+                <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500">
+                  <Lock className="h-4 w-4" />
+                </span>
+                <input
+                  type="password"
+                  placeholder="Saisir le mot de passe"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  className={`w-full bg-slate-950 border ${loginRole === 'admin' ? 'border-amber-900/30' : 'border-slate-800'} rounded-none pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-600 font-mono focus:outline-none ${loginRole === 'admin' ? 'focus:border-amber-500 focus:ring-1 focus:ring-amber-500' : 'focus:border-sky-500 focus:ring-1 focus:ring-sky-500'}`}
+                  required
+                  autoComplete="new-password"
+                />
+              </div>
+            </div>
 
             {/* Submit Button */}
             <button

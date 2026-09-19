@@ -45,9 +45,9 @@ interface ActipaPanelProps {
 
 export default function ActipaPanel({ calcMasterId, masters = [], session }: ActipaPanelProps) {
   // Mode selection
-  const [mode, setMode] = useState<'CAPABILITY' | 'REPEATABILITY'>(() => {
+  const [mode, setMode] = useState<'CAPABILITY' | 'REPEATABILITY' | 'AIRBUS_EV'>(() => {
     const saved = localStorage.getItem("actipa_mode");
-    return saved === 'REPEATABILITY' ? 'REPEATABILITY' : 'CAPABILITY';
+    return saved === 'REPEATABILITY' ? 'REPEATABILITY' : saved === 'AIRBUS_EV' ? 'AIRBUS_EV' : 'CAPABILITY';
   });
   
   // State for parsed files and config
@@ -1097,7 +1097,9 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
                       <tbody className="divide-y divide-slate-950 text-slate-300">
                         {filteredCapability.length === 0 ? (
                           <tr>
-                            <td colSpan={8} className="px-6 py-8 text-center text-slate-500 italic">Aucun test point ne correspond à la recherche.</td>
+                            <td colSpan={8} className="px-6 py-8 text-center text-slate-500 italic">
+                              Aucun test point ne correspond à la recherche
+                            </td>
                           </tr>
                         ) : (
                           filteredCapability.map((r, idx) => (
@@ -1109,17 +1111,23 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
                               <td className="px-6 py-4 text-slate-400">
                                 {r.lsl} {r.unit} à {r.usl} {r.unit}
                               </td>
-                              <td className="px-6 py-4 text-right">{r.mean.toFixed(4)}</td>
-                              <td className="px-6 py-4 text-right text-slate-400">{r.sigma.toFixed(5)}</td>
+                              <td className="px-6 py-4 text-right">
+                                {r.mean != null ? r.mean.toFixed(4) : "N/A"}
+                              </td>
+                              <td className="px-6 py-4 text-right text-slate-400">
+                                {r.sigma != null ? r.sigma.toFixed(5) : "N/A"}
+                              </td>
                               <td className="px-6 py-4 text-right font-bold text-white">
-                                {r.cp === 9999 ? "N/A" : r.cp.toFixed(3)}
+                                {r.cp == null || r.cp === 9999 ? "N/A" : r.cp.toFixed(3)}
                               </td>
                               <td className={`px-6 py-4 text-right font-black ${
                                 r.status === 'OK' ? 'text-emerald-400' : 'text-rose-400'
                               }`}>
-                                {r.cpk === 9999 ? "N/A" : r.cpk.toFixed(3)}
+                                {r.cpk == null || r.cpk === 9999 ? "N/A" : r.cpk.toFixed(3)}
                               </td>
-                              <td className="px-6 py-4 text-right text-slate-400">{r.centering.toFixed(3)}</td>
+                              <td className="px-6 py-4 text-right text-slate-400">
+                                {r.centering != null ? r.centering.toFixed(3) : "N/A"}
+                              </td>
                               <td className="px-6 py-4 text-center">
                                 <span className={`px-2.5 py-1 text-[10px] font-bold tracking-wider uppercase inline-block border ${
                                   r.status === 'OK' 
@@ -1135,7 +1143,7 @@ export default function ActipaPanel({ calcMasterId, masters = [], session }: Act
                           ))
                         )}
                       </tbody>
-                    </table>
+                     </table>
                   )}
 
                   {/* REPEATABILITY GRR TABLE */}
